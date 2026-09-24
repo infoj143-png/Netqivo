@@ -3,6 +3,11 @@ import {
   calculateMeanPing,
   calculateJitter,
 } from "./speed-calc";
+import {
+  validatePingResponse,
+  validateDownloadResponse,
+  validateUploadResponse,
+} from "./api-validation";
 
 export type TestState =
   | "idle"
@@ -53,22 +58,101 @@ export function isMockModeEnabled(): boolean {
 }
 
 /**
- * Runs mock test sequence for development/testing environments when NEXT_PUBLIC_ENABLE_MOCK_MODE=true
+ * Fetch helper with AbortController and configurable timeout
+ */
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit & { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Response> {
+  const { timeoutMs = 10000, signal, ...fetchOpts } = options;
+
+  if (signal?.aborted) {
+    throw new DOMException("Speed test cancelled.", "AbortError");
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(
+      new DOMException(
+        `Request timed out after ${timeoutMs}ms`,
+        "TimeoutError",
+      ),
+    );
+  }, timeoutMs);
+
+  const onAbort = () => {
+    controller.abort(
+      signal?.reason || new DOMException("Speed test cancelled.", "AbortError"),
+    );
+  };
+
+  if (signal) {
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  try {
+    const response = await fetch(url, {
+      ...fetchOpts,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      if (signal?.aborted) {
+        throw new DOMException("Speed test cancelled.", "AbortError");
+      }
+      throw err;
+    }
+    if (typeof window !== "undefined" && !navigator.onLine) {
+      throw new Error(
+        "Network connection lost. Please check your internet connection.",
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/**
+ * Helper to delay execution with cancellation support
+ */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new DOMException("Speed test cancelled.", "AbortError"));
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Speed test cancelled.", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Runs mock test sequence when NEXT_PUBLIC_ENABLE_MOCK_MODE=true
  */
 async function runMockTest(
   onProgress: ProgressCallback,
+  signal?: AbortSignal,
 ): Promise<SpeedTestResult> {
-  // Step 1: Preparing
   onProgress({ state: "preparing", currentSpeedMbps: 0, progressPercent: 5 });
-  await new Promise((r) => setTimeout(r, 400));
+  await delay(300, signal);
 
-  // Step 2: Testing Ping
   onProgress({
     state: "testing-ping",
     currentSpeedMbps: 0,
     progressPercent: 15,
   });
-  await new Promise((r) => setTimeout(r, 600));
+  await delay(400, signal);
 
   const pingMs = 18.5;
   const jitterMs = 2.4;
@@ -87,16 +171,15 @@ async function runMockTest(
     serverLocation,
   });
 
-  // Step 3: Testing Download
   let currentDownload = 0;
   const targetDownload = 85.4;
   for (let i = 1; i <= 10; i++) {
-    await new Promise((r) => setTimeout(r, 120));
+    await delay(100, signal);
     currentDownload = Number(((targetDownload * i) / 10).toFixed(2));
     onProgress({
       state: "testing-download",
       currentSpeedMbps: currentDownload,
-      progressPercent: 25 + i * 3.5, // up to 60%
+      progressPercent: 25 + i * 3.5,
       pingMs,
       jitterMs,
       clientIp,
@@ -107,16 +190,15 @@ async function runMockTest(
 
   const downloadMbps = targetDownload;
 
-  // Step 4: Testing Upload
   let currentUpload = 0;
   const targetUpload = 42.1;
   for (let i = 1; i <= 10; i++) {
-    await new Promise((r) => setTimeout(r, 120));
+    await delay(100, signal);
     currentUpload = Number(((targetUpload * i) / 10).toFixed(2));
     onProgress({
       state: "testing-upload",
       currentSpeedMbps: currentUpload,
-      progressPercent: 60 + i * 3.5, // up to 95%
+      progressPercent: 60 + i * 3.5,
       pingMs,
       jitterMs,
       downloadMbps,
@@ -160,70 +242,99 @@ async function runMockTest(
  */
 export async function runSpeedTest(
   onProgress: ProgressCallback,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<SpeedTestResult> {
+  const { signal, timeoutMs = 10000 } = options;
+
   if (isMockModeEnabled()) {
-    return runMockTest(onProgress);
+    return runMockTest(onProgress, signal);
   }
 
   const baseUrl = getApiBaseUrl();
 
   try {
-    // 1. Preparing & Fetch Ping Info
-    onProgress({ state: "preparing", currentSpeedMbps: 0, progressPercent: 5 });
-
-    const pingStart = Date.now();
-    const pingRes = await fetch(`${baseUrl}/api/speedtest/ping`, {
-      cache: "no-store",
-    }).catch(() => {
+    // Check network status
+    if (typeof window !== "undefined" && !navigator.onLine) {
       throw new Error(
-        "Speed test server is unreachable. Please check your network or try again later.",
-      );
-    });
-
-    if (!pingRes.ok) {
-      throw new Error(
-        `Ping server returned status ${pingRes.status}. Test aborted.`,
+        "Network connection lost. Please check your internet connection.",
       );
     }
 
-    const pingData = await pingRes.json();
-    const clientIp = pingData.clientIp || "Unknown IP";
-    const ispName = pingData.isp || "Internet Service Provider";
-    const serverLocation = pingData.location || "Primary Test Server";
+    // 1. Preparing
+    onProgress({ state: "preparing", currentSpeedMbps: 0, progressPercent: 5 });
 
-    // 2. Measure Ping & Jitter
+    // 2. Measure Ping & Jitter using multiple requests
     onProgress({
       state: "testing-ping",
       currentSpeedMbps: 0,
       progressPercent: 15,
-      clientIp,
-      ispName,
-      serverLocation,
     });
 
     const latencies: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      const pStart = performance.now();
-      const res = await fetch(
-        `${baseUrl}/api/speedtest/ping?t=${Date.now()}_${i}`,
-        { cache: "no-store" },
-      );
-      if (res.ok) {
-        latencies.push(performance.now() - pStart);
+    let serverLocation = "Unknown Server";
+    let clientIp = "Unknown IP";
+    let ispName = "Internet Service Provider";
+
+    const PING_SAMPLES = 5;
+    for (let i = 0; i < PING_SAMPLES; i++) {
+      if (signal?.aborted) {
+        throw new DOMException("Speed test cancelled.", "AbortError");
       }
+
+      const pingStart = performance.now();
+      const pingUrl = `${baseUrl}/speedtest/ping?t=${Date.now()}_${i}`;
+
+      const res = await fetchWithTimeout(pingUrl, {
+        signal,
+        cache: "no-store",
+        timeoutMs: Math.min(timeoutMs, 5000),
+      }).catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          throw err;
+        }
+        throw new Error(
+          `Ping request failed: ${
+            err instanceof Error ? err.message : "Server unreachable"
+          }`,
+        );
+      });
+
+      if (!res.ok) {
+        throw new Error(
+          `Ping server returned HTTP status ${res.status}. Test aborted.`,
+        );
+      }
+
+      let pingDataRaw: unknown;
+      try {
+        pingDataRaw = await res.json();
+      } catch {
+        throw new Error("Ping endpoint returned malformed non-JSON response.");
+      }
+
+      const pingData = validatePingResponse(pingDataRaw);
+      const measuredRtt = Number((performance.now() - pingStart).toFixed(1));
+      const samplePing =
+        typeof pingData.latencyMs === "number"
+          ? pingData.latencyMs
+          : measuredRtt;
+
+      latencies.push(samplePing);
+      if (pingData.server) serverLocation = pingData.server;
+      if (pingData.clientIp) clientIp = pingData.clientIp;
+      if (pingData.isp) ispName = pingData.isp;
+
       onProgress({
         state: "testing-ping",
         currentSpeedMbps: 0,
-        progressPercent: 15 + (i + 1) * 2,
+        progressPercent: 15 + Math.floor(((i + 1) / PING_SAMPLES) * 10),
         clientIp,
         ispName,
         serverLocation,
       });
     }
 
-    const pingMs =
-      calculateMeanPing(latencies) ||
-      Number((Date.now() - pingStart).toFixed(1));
+    const pingMs = calculateMeanPing(latencies);
     const jitterMs = calculateJitter(latencies);
 
     onProgress({
@@ -250,54 +361,106 @@ export async function runSpeedTest(
     });
 
     const downloadStart = performance.now();
-    const dlResponse = await fetch(
-      `${baseUrl}/api/speedtest/download?size=10&t=${Date.now()}`,
-      { cache: "no-store" },
-    );
+    const downloadUrl = `${baseUrl}/speedtest/download?duration=10&t=${Date.now()}`;
 
-    if (!dlResponse.ok || !dlResponse.body) {
-      throw new Error("Failed to download payload from speed test server.");
+    const dlResponse = await fetchWithTimeout(downloadUrl, {
+      signal,
+      cache: "no-store",
+      timeoutMs,
+    }).catch((err) => {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw err;
+      }
+      throw new Error(
+        `Download request failed: ${
+          err instanceof Error ? err.message : "Server unreachable"
+        }`,
+      );
+    });
+
+    if (!dlResponse.ok) {
+      throw new Error(
+        `Download server returned HTTP status ${dlResponse.status}. Test aborted.`,
+      );
     }
 
-    const reader = dlResponse.body.getReader();
-    let downloadedBytes = 0;
-    const totalExpectedBytes = parseInt(
-      dlResponse.headers.get("Content-Length") || "10485760",
-      10,
-    );
+    let downloadMbps = 0;
+    const contentType = dlResponse.headers.get("Content-Type") || "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        downloadedBytes += value.byteLength;
-        const elapsedSec = (performance.now() - downloadStart) / 1000;
-        if (elapsedSec > 0) {
-          const currentMbps = Number(
-            ((downloadedBytes * 8) / (elapsedSec * 1_000_000)).toFixed(2),
-          );
-          const dlPercent =
-            30 +
-            Math.min(
-              30,
-              Math.floor((downloadedBytes / totalExpectedBytes) * 30),
+    if (contentType.includes("application/json")) {
+      let dlDataRaw: unknown;
+      try {
+        dlDataRaw = await dlResponse.json();
+      } catch {
+        throw new Error("Download endpoint returned malformed JSON response.");
+      }
+      const validatedDl = validateDownloadResponse(dlDataRaw);
+      downloadMbps = calculateMbps(validatedDl.bytes, validatedDl.durationMs);
+      if (validatedDl.server) serverLocation = validatedDl.server;
+
+      onProgress({
+        state: "testing-download",
+        currentSpeedMbps: downloadMbps,
+        progressPercent: 60,
+        pingMs,
+        jitterMs,
+        downloadMbps,
+        clientIp,
+        ispName,
+        serverLocation,
+      });
+    } else {
+      // Handle streaming binary body
+      if (!dlResponse.body) {
+        throw new Error("No response body received from download endpoint.");
+      }
+
+      const reader = dlResponse.body.getReader();
+      let downloadedBytes = 0;
+      const totalExpectedBytes = parseInt(
+        dlResponse.headers.get("Content-Length") || "10485760",
+        10,
+      );
+
+      while (true) {
+        if (signal?.aborted) {
+          reader.cancel().catch(() => {});
+          throw new DOMException("Speed test cancelled.", "AbortError");
+        }
+
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          downloadedBytes += value.byteLength;
+          const elapsedSec = (performance.now() - downloadStart) / 1000;
+          if (elapsedSec > 0) {
+            const currentMbps = calculateMbps(
+              downloadedBytes,
+              elapsedSec * 1000,
             );
-          onProgress({
-            state: "testing-download",
-            currentSpeedMbps: currentMbps,
-            progressPercent: dlPercent,
-            pingMs,
-            jitterMs,
-            clientIp,
-            ispName,
-            serverLocation,
-          });
+            const dlPercent =
+              30 +
+              Math.min(
+                30,
+                Math.floor((downloadedBytes / totalExpectedBytes) * 30),
+              );
+            onProgress({
+              state: "testing-download",
+              currentSpeedMbps: currentMbps,
+              progressPercent: dlPercent,
+              pingMs,
+              jitterMs,
+              clientIp,
+              ispName,
+              serverLocation,
+            });
+          }
         }
       }
-    }
 
-    const downloadDurationMs = performance.now() - downloadStart;
-    const downloadMbps = calculateMbps(downloadedBytes, downloadDurationMs);
+      const downloadDurationMs = performance.now() - downloadStart;
+      downloadMbps = calculateMbps(downloadedBytes, downloadDurationMs);
+    }
 
     onProgress({
       state: "testing-download",
@@ -324,30 +487,54 @@ export async function runSpeedTest(
       serverLocation,
     });
 
-    // Send 4MB chunk for upload test
+    // Generate binary data payload (4MB)
     const uploadPayloadSize = 4 * 1024 * 1024;
     const uploadChunk = new Uint8Array(uploadPayloadSize);
-
     const uploadStart = performance.now();
+    const uploadUrl = `${baseUrl}/speedtest/upload?t=${Date.now()}`;
 
-    const ulResponse = await fetch(
-      `${baseUrl}/api/speedtest/upload?t=${Date.now()}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-        },
-        body: uploadChunk,
-        cache: "no-store",
+    const ulResponse = await fetchWithTimeout(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
       },
-    );
+      body: uploadChunk,
+      cache: "no-store",
+      signal,
+      timeoutMs,
+    }).catch((err) => {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw err;
+      }
+      throw new Error(
+        `Upload request failed: ${
+          err instanceof Error ? err.message : "Server unreachable"
+        }`,
+      );
+    });
 
     if (!ulResponse.ok) {
-      throw new Error("Failed to post upload payload to speed test server.");
+      throw new Error(
+        `Upload server returned HTTP status ${ulResponse.status}. Test aborted.`,
+      );
     }
 
     const uploadDurationMs = performance.now() - uploadStart;
-    const uploadMbps = calculateMbps(uploadPayloadSize, uploadDurationMs);
+    let uploadDataRaw: unknown;
+    try {
+      uploadDataRaw = await ulResponse.json();
+    } catch {
+      throw new Error("Upload endpoint returned malformed JSON response.");
+    }
+
+    const validatedUl = validateUploadResponse(uploadDataRaw);
+    if (validatedUl.server) serverLocation = validatedUl.server;
+
+    // Calculate upload speed using formula with exact transferred bytes and duration
+    const uploadMbps = calculateMbps(
+      validatedUl.bytes,
+      validatedUl.durationMs || uploadDurationMs,
+    );
 
     onProgress({
       state: "testing-upload",
@@ -388,6 +575,19 @@ export async function runSpeedTest(
 
     return finalResult;
   } catch (error: unknown) {
+    if (
+      (error instanceof DOMException && error.name === "AbortError") ||
+      (error instanceof Error && error.message.includes("cancelled"))
+    ) {
+      onProgress({
+        state: "idle",
+        currentSpeedMbps: 0,
+        progressPercent: 0,
+        errorMessage: "Speed test was cancelled.",
+      });
+      throw error;
+    }
+
     const errorMessage =
       error instanceof Error
         ? error.message
