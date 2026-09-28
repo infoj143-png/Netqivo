@@ -1,35 +1,41 @@
-'use client';
+"use client";
 
-import React, { useState, useCallback } from 'react';
-import { SpeedGauge } from './SpeedGauge';
-import { ResultCards } from './ResultCards';
-import { TestHistory } from './TestHistory';
+import React, { useState, useCallback, useRef, useEffect } from "react";
+import { SpeedGauge } from "./SpeedGauge";
+import { ResultCards } from "./ResultCards";
+import { TestHistory } from "./TestHistory";
 import {
   runSpeedTest,
   TestState,
   SpeedTestResult,
   SpeedTestProgress,
   isMockModeEnabled,
-} from '@/lib/speedtest-api';
+} from "@/lib/speedtest-api";
 
-const HISTORY_STORAGE_KEY = 'speedtest_history_v1';
+const HISTORY_STORAGE_KEY = "speedtest_history_v1";
 
 export const SpeedTestApp: React.FC = () => {
-  const [testState, setTestState] = useState<TestState>('idle');
+  const [testState, setTestState] = useState<TestState>("idle");
   const [currentSpeed, setCurrentSpeed] = useState<number>(0);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const [downloadMbps, setDownloadMbps] = useState<number | undefined>(undefined);
+  const [downloadMbps, setDownloadMbps] = useState<number | undefined>(
+    undefined,
+  );
   const [uploadMbps, setUploadMbps] = useState<number | undefined>(undefined);
   const [pingMs, setPingMs] = useState<number | undefined>(undefined);
   const [jitterMs, setJitterMs] = useState<number | undefined>(undefined);
   const [clientIp, setClientIp] = useState<string | undefined>(undefined);
   const [ispName, setIspName] = useState<string | undefined>(undefined);
-  const [serverLocation, setServerLocation] = useState<string | undefined>(undefined);
+  const [serverLocation, setServerLocation] = useState<string | undefined>(
+    undefined,
+  );
+
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [history, setHistory] = useState<SpeedTestResult[]>(() => {
-    if (typeof window === 'undefined') return [];
+    if (typeof window === "undefined") return [];
     try {
       const saved = localStorage.getItem(HISTORY_STORAGE_KEY);
       if (saved) {
@@ -44,10 +50,29 @@ export const SpeedTestApp: React.FC = () => {
 
   const [mockMode] = useState<boolean>(() => isMockModeEnabled());
 
-  // Save history to localStorage helper
+  // Cleanup active test when page unmounts or user navigates away
+  useEffect(() => {
+    const handleUnload = () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+
+    window.addEventListener("beforeunload", handleUnload);
+    window.addEventListener("pagehide", handleUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleUnload);
+      window.removeEventListener("pagehide", handleUnload);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
   const saveToHistory = useCallback((result: SpeedTestResult) => {
     setHistory((prev) => {
-      const updated = [result, ...prev].slice(0, 20); // Keep latest 20 items
+      const updated = [result, ...prev].slice(0, 20);
       try {
         localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
       } catch {
@@ -66,9 +91,28 @@ export const SpeedTestApp: React.FC = () => {
     }
   };
 
+  const cancelTest = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setTestState("idle");
+    setCurrentSpeed(0);
+    setProgressPercent(0);
+    setErrorMessage("Speed test cancelled.");
+  };
+
   const startTest = async () => {
+    // Prevent multiple tests from running concurrently
+    if (abortControllerRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     // Reset test metrics
-    setTestState('preparing');
+    setTestState("preparing");
     setCurrentSpeed(0);
     setProgressPercent(0);
     setErrorMessage(null);
@@ -84,32 +128,49 @@ export const SpeedTestApp: React.FC = () => {
 
       if (progress.pingMs !== undefined) setPingMs(progress.pingMs);
       if (progress.jitterMs !== undefined) setJitterMs(progress.jitterMs);
-      if (progress.downloadMbps !== undefined) setDownloadMbps(progress.downloadMbps);
+      if (progress.downloadMbps !== undefined)
+        setDownloadMbps(progress.downloadMbps);
       if (progress.uploadMbps !== undefined) setUploadMbps(progress.uploadMbps);
       if (progress.clientIp !== undefined) setClientIp(progress.clientIp);
       if (progress.ispName !== undefined) setIspName(progress.ispName);
-      if (progress.serverLocation !== undefined) setServerLocation(progress.serverLocation);
-      if (progress.errorMessage !== undefined) setErrorMessage(progress.errorMessage);
+      if (progress.serverLocation !== undefined)
+        setServerLocation(progress.serverLocation);
+      if (progress.errorMessage !== undefined)
+        setErrorMessage(progress.errorMessage);
     };
 
     try {
-      const result = await runSpeedTest(handleProgress);
+      const result = await runSpeedTest(handleProgress, {
+        signal: controller.signal,
+      });
       saveToHistory(result);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Unable to complete speed test. Please check your network connection and try again.';
-      setTestState('error');
-      setErrorMessage(msg);
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && err.message.includes("cancelled"))
+      ) {
+        setTestState("idle");
+        setCurrentSpeed(0);
+        setProgressPercent(0);
+        setErrorMessage("Speed test cancelled.");
+      } else {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Unable to complete speed test. Please check your network connection and try again.";
+        setTestState("error");
+        setErrorMessage(msg);
+      }
+    } finally {
+      abortControllerRef.current = null;
     }
   };
 
   const isTesting =
-    testState === 'preparing' ||
-    testState === 'testing-ping' ||
-    testState === 'testing-download' ||
-    testState === 'testing-upload';
+    testState === "preparing" ||
+    testState === "testing-ping" ||
+    testState === "testing-download" ||
+    testState === "testing-upload";
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-8">
@@ -118,7 +179,10 @@ export const SpeedTestApp: React.FC = () => {
         <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-4 py-2 text-xs font-semibold flex items-center justify-between shadow-sm">
           <div className="flex items-center space-x-2">
             <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-            <span>Development Mock Mode is ACTIVE (NEXT_PUBLIC_ENABLE_MOCK_MODE=true)</span>
+            <span>
+              Development Mock Mode is ACTIVE
+              (NEXT_PUBLIC_ENABLE_MOCK_MODE=true)
+            </span>
           </div>
           <span className="text-[10px] uppercase bg-amber-200 px-2 py-0.5 rounded font-bold">
             Simulated Results
@@ -135,54 +199,61 @@ export const SpeedTestApp: React.FC = () => {
           progressPercent={progressPercent}
         />
 
-        {/* Start / Retest Button */}
+        {/* Start / Cancel / Retest Button */}
         <div className="mt-6">
-          <button
-            onClick={startTest}
-            disabled={isTesting}
-            className={`px-8 py-4 rounded-xl text-white font-extrabold text-lg shadow-lg tracking-wide transition-all duration-200 flex items-center space-x-2 ${
-              isTesting
-                ? 'bg-slate-400 cursor-not-allowed opacity-80'
-                : 'bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-blue-500/20'
-            }`}
-            aria-label={isTesting ? 'Speed test in progress' : 'Start Speed Test'}
-          >
-            {isTesting ? (
-              <>
-                <svg
-                  className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  />
-                </svg>
-                <span>Testing Network...</span>
-              </>
-            ) : testState === 'completed' || testState === 'error' ? (
-              <span>Test Again</span>
-            ) : (
-              <span>Start Test</span>
-            )}
-          </button>
+          {isTesting ? (
+            <button
+              onClick={cancelTest}
+              className="px-8 py-4 rounded-xl text-white font-extrabold text-lg bg-rose-600 hover:bg-rose-700 active:scale-95 shadow-lg shadow-rose-500/20 transition-all duration-200 flex items-center space-x-2 cursor-pointer"
+              aria-label="Cancel Speed Test"
+            >
+              <svg
+                className="w-5 h-5 mr-1"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+              <span>Cancel Test</span>
+            </button>
+          ) : (
+            <button
+              onClick={startTest}
+              className="px-8 py-4 rounded-xl text-white font-extrabold text-lg bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-lg shadow-blue-500/20 transition-all duration-200 flex items-center space-x-2 cursor-pointer"
+              aria-label={
+                testState === "completed" || testState === "error"
+                  ? "Retest Network"
+                  : "Start Speed Test"
+              }
+            >
+              <span>
+                {testState === "completed" || testState === "error"
+                  ? "Test Again"
+                  : "Start Test"}
+              </span>
+            </button>
+          )}
         </div>
 
-        {/* Error Message Box */}
-        {testState === 'error' && errorMessage && (
-          <div className="mt-6 w-full max-w-lg bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-4 text-sm flex items-start space-x-3 text-left">
+        {/* Error / Cancellation Message Box */}
+        {(testState === "error" || errorMessage) && errorMessage && (
+          <div
+            className={`mt-6 w-full max-w-lg rounded-xl p-4 text-sm flex items-start space-x-3 text-left border ${
+              testState === "error"
+                ? "bg-rose-50 border-rose-200 text-rose-800"
+                : "bg-slate-50 border-slate-200 text-slate-700"
+            }`}
+          >
             <svg
-              className="w-5 h-5 text-rose-600 shrink-0 mt-0.5"
+              className={`w-5 h-5 shrink-0 mt-0.5 ${
+                testState === "error" ? "text-rose-600" : "text-slate-500"
+              }`}
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -195,8 +266,14 @@ export const SpeedTestApp: React.FC = () => {
               />
             </svg>
             <div>
-              <h4 className="font-bold text-rose-900">Speed Test Error</h4>
-              <p className="mt-1 text-xs text-rose-700">{errorMessage}</p>
+              <h4
+                className={`font-bold ${
+                  testState === "error" ? "text-rose-900" : "text-slate-800"
+                }`}
+              >
+                {testState === "error" ? "Speed Test Error" : "Notice"}
+              </h4>
+              <p className="mt-1 text-xs">{errorMessage}</p>
             </div>
           </div>
         )}
