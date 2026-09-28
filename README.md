@@ -1,6 +1,6 @@
 # Internet Speed Checker
 
-A modern, production-ready broadband internet speed checker application built with Next.js, TypeScript, and Tailwind CSS.
+A modern, production-ready broadband internet speed checker application built with Next.js, TypeScript, Tailwind CSS, and a dedicated Express Node.js backend.
 
 ## Features
 
@@ -21,9 +21,13 @@ A modern, production-ready broadband internet speed checker application built wi
   - Testing upload
   - Completed
   - Error
+- **Production Backend**:
+  - High-performance TypeScript Node.js & Express backend server (`/backend`).
+  - Strict CORS origin filtering, rate limiting, and security headers.
+  - Streaming download bytes and zero-storage upload processing.
+  - Health check endpoint (`GET /health`) for load balancer monitoring.
 - **Cancel Test & Concurrency Control**: Cancel running tests at any time and prevent multiple tests from executing simultaneously.
 - **LocalStorage Test History**: Stores recent speed test runs with timestamps, formatted speeds, and quick clear options.
-- **Error & Timeout Handling**: Graceful fallback, cancellation, timeout detection, response validation, and clear UI notifications.
 - **Mock Mode Support**: Toggleable mock mode via `NEXT_PUBLIC_ENABLE_MOCK_MODE=true` for local frontend testing.
 
 ---
@@ -36,10 +40,22 @@ Copy `.env.example` to `.env.local` to configure environment variables:
 cp .env.example .env.local
 ```
 
-| Variable                        | Default | Description                                                                 |
-| ------------------------------- | ------- | --------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_SPEEDTEST_API_URL` | `""`    | Base URL for external speed test API backend.                               |
-| `NEXT_PUBLIC_ENABLE_MOCK_MODE`  | `false` | Set to `true` to enable development mock test mode with simulated progress. |
+### Frontend Environment Variables
+
+| Variable                        | Default                 | Description                                                                 |
+| ------------------------------- | ----------------------- | --------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_SPEEDTEST_API_URL` | `http://localhost:5000` | Base URL for external speed test Express API backend.                       |
+| `NEXT_PUBLIC_ENABLE_MOCK_MODE`  | `false`                 | Set to `true` to enable development mock test mode with simulated progress. |
+
+### Backend Environment Variables
+
+| Variable                    | Default                 | Description                                            |
+| --------------------------- | ----------------------- | ------------------------------------------------------ |
+| `PORT`                      | `5000`                  | Port on which the Express server listens.              |
+| `ALLOWED_ORIGINS`           | `http://localhost:3000` | Comma-separated list of allowed frontend origin URLs.  |
+| `SERVER_NAME`               | `SpeedTest Edge Node`   | Name/location of the speed test server node.           |
+| `MAX_TEST_DURATION_SECONDS` | `30`                    | Maximum allowable duration for download test.          |
+| `MAX_UPLOAD_BYTES`          | `52428800`              | Maximum allowable binary upload payload size in bytes. |
 
 > **Production Note**: In production mode (`NEXT_PUBLIC_ENABLE_MOCK_MODE=false`), real tests measure actual data transfer against speed test backend endpoints (`NEXT_PUBLIC_SPEEDTEST_API_URL`) and never output fake speed results.
 
@@ -47,60 +63,23 @@ cp .env.example .env.local
 
 ## Backend API Contract
 
-The application calls the following external or relative backend endpoints:
+The application calls the following Express or serverless backend endpoints:
 
-### 1. GET `/speedtest/ping`
+### 1. GET `/health`
 
-Returns server ping latency, server location, and optional client network details.
+Health check endpoint returning server status, server name, timestamp, and uptime. See [`backend/README.md`](./backend/README.md) for full details.
 
-**Response Example**:
+### 2. GET `/speedtest/ping`
 
-```json
-{
-  "latencyMs": 42,
-  "server": "Lahore"
-}
-```
+Returns server ping latency, server location, client IP, and ISP details.
 
-### 2. GET `/speedtest/download?duration=10`
+### 3. GET `/speedtest/download?duration=10`
 
-Measures or returns download bandwidth metrics.
+Streams binary payload or JSON response to measure download bandwidth. Rejects abusive duration parameters with HTTP 400.
 
-**Parameters**:
+### 4. POST `/speedtest/upload`
 
-- `duration`: Test duration target in seconds (default `10`).
-
-**Response Example**:
-
-```json
-{
-  "bytes": 123456789,
-  "durationMs": 10000,
-  "speedMbps": 98.76,
-  "server": "Lahore"
-}
-```
-
-### 3. POST `/speedtest/upload`
-
-Receives binary payload and measures upload bandwidth metrics.
-
-**Request Payload**: `application/octet-stream` (binary buffer payload).
-
-**Response Example**:
-
-```json
-{
-  "bytes": 12345678,
-  "durationMs": 10000,
-  "speedMbps": 9.87,
-  "server": "Lahore"
-}
-```
-
-### Speed Calculation Formula
-
-$$\text{speedMbps} = \frac{\text{bytes} \times 8}{\text{durationSeconds} \times 1,000,000}$$
+Receives binary payload (`application/octet-stream`), measures transfer duration and byte count without storing data, and enforces size limits (HTTP 413).
 
 ---
 
@@ -111,7 +90,7 @@ $$\text{speedMbps} = \frac{\text{bytes} \times 8}{\text{durationSeconds} \times 
 - Node.js 18.x or later
 - npm or yarn
 
-### Installation
+### Installation & Development
 
 1. Install dependencies:
 
@@ -119,19 +98,25 @@ $$\text{speedMbps} = \frac{\text{bytes} \times 8}{\text{durationSeconds} \times 
    npm install
    ```
 
-2. Run the development server:
+2. Run Express Backend Server:
+
+   ```bash
+   cd backend && npm run dev
+   ```
+
+3. Run Next.js Frontend Server (in a separate terminal):
 
    ```bash
    npm run dev
    ```
 
-3. Open [http://localhost:3000](http://localhost:3000) in your browser.
+4. Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
 ## Testing & Quality Commands
 
-- **Run Unit & Component Tests**:
+- **Run All Unit & Integration Tests**:
   ```bash
   npm test
   ```
@@ -152,10 +137,14 @@ $$\text{speedMbps} = \frac{\text{bytes} \times 8}{\text{durationSeconds} \times 
 
 ## Deployment Instructions
 
-### Vercel / Netlify / Next.js Hosts
+### Express Backend Deployment
+
+See complete Docker and Cloud deployment instructions in [`backend/README.md`](./backend/README.md).
+
+### Frontend Deployment (Vercel / Netlify)
 
 1. Connect your repository to Vercel or your hosting provider.
-2. Ensure environment variables are set in your provider's dashboard:
-   - `NEXT_PUBLIC_SPEEDTEST_API_URL`
+2. Configure environment variables in provider dashboard:
+   - `NEXT_PUBLIC_SPEEDTEST_API_URL=https://your-backend-domain.com`
    - `NEXT_PUBLIC_ENABLE_MOCK_MODE=false`
-3. Deploy! Next.js App Router API routes will automatically be hosted as Serverless / Edge Functions.
+3. Deploy!
