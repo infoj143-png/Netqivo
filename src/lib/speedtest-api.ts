@@ -251,6 +251,17 @@ export async function runSpeedTest(
   }
 
   const baseUrl = getApiBaseUrl();
+  if (!baseUrl) {
+    const errorMsg =
+      "Speed test backend API URL is missing. Please set NEXT_PUBLIC_SPEEDTEST_API_URL in your environment variables.";
+    onProgress({
+      state: "error",
+      currentSpeedMbps: 0,
+      progressPercent: 0,
+      errorMessage: errorMsg,
+    });
+    throw new Error(errorMsg);
+  }
 
   try {
     // Check network status

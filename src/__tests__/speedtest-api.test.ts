@@ -6,14 +6,17 @@ import {
 } from "@/lib/api-validation";
 
 const originalFetch = global.fetch;
+const originalEnv = process.env;
 
 describe("SpeedTest API Client & Response Validation", () => {
   beforeEach(() => {
     jest.resetAllMocks();
+    process.env = { ...originalEnv };
   });
 
   afterAll(() => {
     global.fetch = originalFetch;
+    process.env = originalEnv;
   });
 
   describe("API Response Validators", () => {
@@ -150,15 +153,37 @@ describe("SpeedTest API Client & Response Validation", () => {
   });
 
   describe("runSpeedTest against real API endpoints", () => {
-    it("completes speed test flow successfully with valid API responses", async () => {
+    it("throws clear error when backend API URL is missing in production mode", async () => {
+      process.env.NEXT_PUBLIC_SPEEDTEST_API_URL = "";
+      process.env.NEXT_PUBLIC_ENABLE_MOCK_MODE = "false";
+
+      const progressEvents: string[] = [];
+      await expect(
+        runSpeedTest((p) => {
+          progressEvents.push(p.state);
+        }),
+      ).rejects.toThrow(
+        "Speed test backend API URL is missing. Please set NEXT_PUBLIC_SPEEDTEST_API_URL in your environment variables.",
+      );
+
+      expect(progressEvents).toContain("error");
+    });
+
+    it("completes speed test flow successfully with valid HTTPS production API responses", async () => {
+      process.env.NEXT_PUBLIC_SPEEDTEST_API_URL =
+        "https://api.speedtest.example.com";
+      process.env.NEXT_PUBLIC_ENABLE_MOCK_MODE = "false";
+
+      const calledUrls: string[] = [];
       global.fetch = jest.fn((url: string) => {
+        calledUrls.push(url);
         if (url.includes("/speedtest/ping")) {
           return Promise.resolve({
             ok: true,
             json: () =>
               Promise.resolve({
                 latencyMs: 42,
-                server: "Lahore",
+                server: "Production HTTPS Edge Node",
                 clientIp: "203.0.113.1",
                 isp: "Test ISP",
               }),
@@ -173,7 +198,7 @@ describe("SpeedTest API Client & Response Validation", () => {
                 bytes: 123456789,
                 durationMs: 10000,
                 speedMbps: 98.77,
-                server: "Lahore",
+                server: "Production HTTPS Edge Node",
               }),
           });
         }
@@ -185,7 +210,7 @@ describe("SpeedTest API Client & Response Validation", () => {
                 bytes: 12345678,
                 durationMs: 10000,
                 speedMbps: 9.88,
-                server: "Lahore",
+                server: "Production HTTPS Edge Node",
               }),
           });
         }
@@ -197,6 +222,11 @@ describe("SpeedTest API Client & Response Validation", () => {
         progressEvents.push(p.state);
       });
 
+      expect(
+        calledUrls.every((u) =>
+          u.startsWith("https://api.speedtest.example.com/"),
+        ),
+      ).toBe(true);
       expect(progressEvents).toContain("preparing");
       expect(progressEvents).toContain("testing-ping");
       expect(progressEvents).toContain("testing-download");
@@ -206,10 +236,14 @@ describe("SpeedTest API Client & Response Validation", () => {
       expect(result.pingMs).toBe(42);
       expect(result.downloadMbps).toBe(98.77);
       expect(result.uploadMbps).toBe(9.88);
-      expect(result.serverLocation).toBe("Lahore");
+      expect(result.serverLocation).toBe("Production HTTPS Edge Node");
     });
 
     it("throws error and reports error state on malformed API response", async () => {
+      process.env.NEXT_PUBLIC_SPEEDTEST_API_URL =
+        "https://api.speedtest.example.com";
+      process.env.NEXT_PUBLIC_ENABLE_MOCK_MODE = "false";
+
       global.fetch = jest.fn(() =>
         Promise.resolve({
           ok: true,
@@ -228,6 +262,10 @@ describe("SpeedTest API Client & Response Validation", () => {
     });
 
     it("throws error and reports error state on HTTP status 500", async () => {
+      process.env.NEXT_PUBLIC_SPEEDTEST_API_URL =
+        "https://api.speedtest.example.com";
+      process.env.NEXT_PUBLIC_ENABLE_MOCK_MODE = "false";
+
       global.fetch = jest.fn(() =>
         Promise.resolve({
           ok: false,
