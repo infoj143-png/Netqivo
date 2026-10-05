@@ -24,6 +24,18 @@ describe("CORS Restrictions", () => {
     );
   });
 
+  it("allows production frontend origin https://netqivo.vercel.app with default config", async () => {
+    const defaultApp = createApp();
+    const res = await request(defaultApp)
+      .get("/health")
+      .set("Origin", "https://netqivo.vercel.app");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(
+      "https://netqivo.vercel.app",
+    );
+  });
+
   it("blocks unconfigured origin with HTTP 403 Forbidden", async () => {
     const res = await request(app)
       .get("/health")

@@ -135,47 +135,62 @@ Receives binary payload (`application/octet-stream`), measures transfer duration
 
 ---
 
-## Vercel Deployment Guide
+## Deployment Guide (Render Backend + Vercel Frontend)
 
-Follow these instructions to deploy the Next.js frontend to Vercel and connect it to a production HTTPS backend.
+Follow this complete step-by-step guide to deploy the Express backend to **Render** and connect it to the Next.js frontend on **Vercel**.
 
-### 1. GitHub Connection to Vercel
+### Step 1: Deploy Backend on Render First
 
 1. Push your repository to **GitHub**.
-2. Log in to your [Vercel Dashboard](https://vercel.com).
-3. Click **Add New...** > **Project**.
-4. Select your GitHub account and import the `internet-speed-checker` repository.
-5. In the **Framework Preset**, select **Next.js**.
-
-### 2. Environment Variable Configuration
-
-Before deploying, configure the following environment variables in the Vercel project setup or under **Settings > Environment Variables**:
-
-| Variable Name                   | Environment                      | Value                             | Description                                                  |
-| ------------------------------- | -------------------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `NEXT_PUBLIC_SPEEDTEST_API_URL` | Production, Preview, Development | `https://your-backend-domain.com` | Base HTTPS URL of your deployed speed test backend.          |
-| `NEXT_PUBLIC_ENABLE_MOCK_MODE`  | Production, Preview, Development | `false`                           | Ensures real speed tests run against the production backend. |
-
-> **Security Note**: Never prefix backend private keys, database connection strings, or administrative secrets with `NEXT_PUBLIC_`. The `NEXT_PUBLIC_` prefix exposes values to client-side JavaScript bundles.
-
-### 3. Production Deployment
-
-1. Once environment variables are set, click **Deploy**.
-2. Vercel automatically runs `npm run build` and deploys your Next.js application to your production domain (e.g., `https://your-app.vercel.app`).
-3. Whenever you push changes to your default branch (`main` or `master`), Vercel triggers an automated production deployment.
-
-### 4. Preview Deployment
-
-1. Vercel automatically generates a unique **Preview Deployment** URL for every Pull Request or non-main branch push.
-2. Ensure that preview environments have `NEXT_PUBLIC_SPEEDTEST_API_URL` configured if you want preview builds to run speed tests against your staging/production backend.
-
-### 5. Backend CORS Configuration
-
-For the frontend on Vercel to communicate with your backend without browser CORS errors:
-
-1. On your backend server, set the `ALLOWED_ORIGINS` environment variable to include your Vercel production domain and wildcard preview domains if needed:
+2. Log in to [Render](https://render.com) and click **New +** > **Web Service**.
+3. Select your GitHub repository (`netqivo` / `internet-speed-checker`).
+4. Configure service parameters:
+   - **Root Directory**: `backend`
+   - **Runtime**: `Node`
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+5. Configure backend environment variables on Render:
    ```env
-   ALLOWED_ORIGINS=https://your-app.vercel.app,https://your-app-*.vercel.app
+   PORT=5000
+   ALLOWED_ORIGINS=https://netqivo.vercel.app,http://localhost:3000
+   SERVER_NAME=Netqivo SpeedTest Edge Node
+   MAX_TEST_DURATION_SECONDS=30
+   MAX_UPLOAD_BYTES=52428800
    ```
-2. The Express backend handles CORS preflight options (`OPTIONS`) requests automatically using the configured `ALLOWED_ORIGINS`.
-3. Verify that your backend is hosted behind an **HTTPS** URL (e.g., via AWS, Render, Fly.io, or Railway) because modern web browsers block mixed-content non-HTTPS requests from HTTPS Vercel deployments.
+6. Set **Health Check Path**: `/health`
+7. Deploy the Web Service and copy the **generated Render backend URL** from the top of the Render Dashboard (e.g. `https://netqivo-speedtest-backend.onrender.com`).
+
+> **Note**: The exact Render URL is dynamically generated only after creating the web service. It must be copied from Render and set in Vercel environment variables—do not hardcode an example placeholder.
+
+### Step 2: Test Deployed Backend Endpoint
+
+Verify that the backend is live and responding by running:
+
+```bash
+curl https://<your-render-backend-url>/health
+```
+
+Expected output: `{"status":"ok","server":"Netqivo SpeedTest Edge Node",...}`
+
+### Step 3: Deploy Frontend on Vercel
+
+1. Log in to your [Vercel Dashboard](https://vercel.com).
+2. Click **Add New...** > **Project** and import your GitHub repository.
+3. Under **Settings > Environment Variables**, add the following environment variables for Production, Preview, and Development environments:
+
+| Variable Name | Value | Description |
+| --- | --- | --- |
+| `NEXT_PUBLIC_SPEEDTEST_API_URL` | `https://your-render-backend-url` | **Your actual generated Render backend URL** obtained in Step 1. |
+| `NEXT_PUBLIC_ENABLE_MOCK_MODE` | `false` | Disables mock mode so real tests run against the Express backend. |
+
+4. Click **Deploy** or trigger a **Redeploy** on Vercel.
+
+### Step 4: Verify Backend CORS Configuration
+
+Ensure your Render backend `ALLOWED_ORIGINS` includes your production frontend origin (`https://netqivo.vercel.app`):
+
+```env
+ALLOWED_ORIGINS=https://netqivo.vercel.app,http://localhost:3000
+```
+
+Because modern browsers block cross-origin non-HTTPS or unauthorized requests, both frontend and backend must communicate over HTTPS with matching CORS permissions.

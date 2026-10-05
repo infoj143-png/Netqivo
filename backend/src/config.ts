@@ -14,7 +14,11 @@ export function getConfig(): AppConfig {
         .split(",")
         .map((o) => o.trim())
         .filter((o) => o.length > 0)
-    : ["http://localhost:3000", "http://127.0.0.1:3000"];
+    : [
+        "https://netqivo.vercel.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+      ];
 
   const serverName = (process.env.SERVER_NAME || "SpeedTest Edge Node").trim();
   const maxTestDurationSeconds = Math.max(

@@ -12,6 +12,14 @@ const server = app.listen(config.port, () => {
   );
 });
 
+// Configure safe HTTP server timeouts suitable for speed tests while avoiding hanging connections:
+// - requestTimeout: Allows active download/upload test streams up to maxTestDurationSeconds plus buffer (60s).
+// - keepAliveTimeout: Exceeds standard reverse proxy (Render/Nginx) 60s idle timeout to prevent TCP socket races (65s).
+// - headersTimeout: Must exceed keepAliveTimeout in Node.js (66s) to ensure socket timeouts run sequentially without runtime errors.
+server.requestTimeout = Math.max((config.maxTestDurationSeconds + 30) * 1000, 60000);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
 // Graceful shutdown
 const gracefulShutdown = (signal: string) => {
   console.log(
